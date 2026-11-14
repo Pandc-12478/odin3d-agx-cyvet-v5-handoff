@@ -1,21 +1,22 @@
 # Odin3D V5 开发交接
 
-AGX Orin + Odin1 + 宇泛灵猫三维建图与导航。这里保存 2026-11-13 冻结 Demo 的项目 Web 与集成源码。
+这是 AGX Orin、Odin1 和宇泛灵猫项目在 2026-11-13 的冻结源码。入口为 `odin3d` 和 `install.sh`。
 
-## 先看哪里
+## 代码从哪里读
 
-1. [DEPLOY.md](DEPLOY.md) 了解安装入口和外部依赖。
-2. [web/](web/) 查看统一控制台。
-3. [建图脚本](work/integration/odin_onekey_mapping/) 查看扫描和保存。
-4. [导航脚本](work/integration/odin_onekey_nav/) 查看地图转换、重定位和启动。
-5. [桥接代码](work/integration/bridge/) 查看外参、控制器和 SDK 接入。
+- `web/` 负责统一控制台，处理建图、地图、规划和运动按钮。
+- `work/integration/odin_onekey_mapping/` 负责扫描、保存 BIN 和恢复驱动配置。
+- `work/integration/odin_onekey_nav/` 负责转换地图、加载、重定位和启动导航。
+- `work/integration/bridge/` 负责相机到机体的外参、控制器和宇泛 SDK 桥接。
+- `work/integration/nav_ws/src/jie_3d_nav-main/` 保存冻结版导航 ROS 包。
+- `work/odin_ws/src/odin_ros_driver/` 保存冻结版 Odin ROS 驱动源码。
 
-运行入口为 `./odin3d`，安装入口为 `bash install.sh`。源码依据 2026-11-13 20:22 的冻结快照，接手时核对 AGX 现场版本。
+[DEPLOY.md](DEPLOY.md) 说明安装和外部依赖。冻结时的源码修改记录在 `GIT/` 和 `integration.patch`。
 
-## 配套源码
+## 当前还需补齐
 
-原始 `jie_3d_nav` 导航包及早期集成源码在[原有私有仓库](https://github.com/Pandc-12478/agx-odin1-quadruped-navigation)。冻结 Demo 对其修改记录在 `integration.patch` 与 `GIT/integration.diff`。Odin ROS 驱动上游基线为 `f51051f2d861f7643d4d33d2ade2952efe1a4672`，修改记录在 `GIT/odin_driver.diff`。
+宇泛 ARM64 SDK、`dog_control3.py`、Odin1 厂商二进制库和 BIN 转换工具尚未放进仓库。地图 BIN 超过 GitHub 普通文件大小限制。网页的离线 Three.js/ROSLib 资源也尚未放入仓库。设备 ID、密钥和现场网络配置只应在接手设备本地配置。
 
-厂商 ARM64 SDK、BIN 转换工具、`dog_control3.py`、地图、设备 ID、密钥和 AGX 本机配置由设备负责人另行交接。这里的配置文件是示例。更换设备时重新核对外参。三方源码及授权说明见原仓库的 `THIRD_PARTY.md`。
+仓库的 `work/odin_ws/src/odin_ros_driver/config/control_command.yaml` 已清除旧机器的地图绝对路径。原设备的相机标定参数保留，序列号注释已移除。更换设备须核对标定与外参。
 
-冻结 Demo 已有建图、保存、同源地图处理、重定位及网页选点规划证据。真实 SDK 接管、跟踪到点和停止链仍需现场验收。
+冻结 Demo 已有建图、保存、同源地图处理、重定位和网页选点规划证据。真实 SDK 接管、跟踪到点及停止链仍需现场验收。
