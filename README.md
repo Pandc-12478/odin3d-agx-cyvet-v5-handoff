@@ -16,7 +16,7 @@
 
 ## 当前还需补齐
 
-宇泛 ARM64 SDK、Odin1 厂商二进制库和 BIN 转换工具尚未放进仓库。地图 BIN 超过 GitHub 普通文件大小限制。网页的离线 Three.js/ROSLib 资源也尚未放入仓库。设备 ID、密钥和现场网络配置只应在接手设备本地配置。
+宇泛 ARM64 SDK、Odin1 厂商二进制库和 BIN 转换工具尚未放进仓库。地图 BIN 超过 GitHub 普通文件大小限制。网页所需的离线 Three.js/ROSLib 文件已放在导航包的 `web/vendor/`。设备 ID、密钥和现场网络配置只应在接手设备本地配置。
 
 仓库的 `work/odin_ws/src/odin_ros_driver/config/control_command.yaml` 已清除旧机器的地图绝对路径。原设备的相机标定参数保留，序列号注释已移除。更换设备须核对标定与外参。
 
