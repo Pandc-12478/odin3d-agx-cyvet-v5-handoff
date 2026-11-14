@@ -1,0 +1,36 @@
+@font-face{font-family:Interface;src:local("Microsoft YaHei")}
+:root{font-family:Interface,system-ui,sans-serif;color:#ecf1f5;background:#0f171d;color-scheme:dark}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;line-height:1.55}
+header{padding:1rem max(1rem,calc((100vw - 80rem)/2));background:#17242c;border-bottom:1px solid #384a56}
+.top,.signals,nav,.actions{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap}
+.top{justify-content:space-between}
+.brand{font-weight:750;font-size:1.35rem;color:#f2f7fa;text-decoration:none}
+.signals{margin:.7rem 0;color:#b1c6d0}
+.signals span{padding:.2rem .6rem;border:1px solid #445966;border-radius:.4rem;font-size:.88rem}
+nav a{color:#d9e6ec;text-decoration:none;border-radius:.4rem;padding:.4rem .75rem}
+nav a[aria-current]{color:#102b29;background:#86ded0;font-weight:650}
+main{width:min(100%,82rem);margin:auto;padding:1.2rem 1rem 3rem}
+h1{font-size:clamp(1.45rem,4vw,2.1rem);margin:0 0 .85rem}
+p:empty{display:none}
+#feedback,#connection{color:#ffce96}
+button,.button{font:inherit;border:0;border-radius:.4rem;padding:.55rem .85rem;min-height:2.65rem;color:#102b29;background:#86ded0;font-weight:650;cursor:pointer;text-decoration:none;display:inline-block}
+button:disabled{opacity:.45;cursor:default}
+.quiet{background:#253743;color:#e4eff3}
+.stop{background:#f7aca4;color:#44110c}
+:focus-visible{outline:2px solid #ffe498;outline-offset:3px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,14rem),1fr));gap:.65rem;margin:0 0 1rem}
+.cards div{background:#1a2831;border:1px solid #364955;border-radius:.6rem;padding:.65rem .8rem;overflow-wrap:anywhere}
+dt{font-size:.84rem;color:#a8bec9}
+dd{margin:.2rem 0 0}
+.motion-panel{border:1px solid #536975;border-radius:.6rem;padding:1rem;margin:1rem 0;background:#192831}
+.motion-panel h2{margin:0 0 .4rem;font-size:1.15rem}
+#motion-feedback{color:#ffce96}
+input{font:inherit;padding:.55rem;border:1px solid #536975;border-radius:.35rem}
+.table-scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;text-align:left}
+td,th{border-bottom:1px solid #364955;padding:.6rem;white-space:nowrap}
+td label{display:flex;gap:.55rem;align-items:center;white-space:normal;overflow-wrap:anywhere;min-width:12rem}
+iframe{width:100%;height:clamp(32rem,78vh,65rem);border:1px solid #445966;border-radius:.55rem;background:#091116}
+@media(max-width:520px){nav,.signals{gap:.35rem}nav a{padding:.38rem .45rem}.actions{gap:.45rem}}

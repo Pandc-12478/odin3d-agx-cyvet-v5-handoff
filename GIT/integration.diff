@@ -1,0 +1,828 @@
+diff --git a/bridge/build_new_map.py b/bridge/build_new_map.py
+index daaaee2..efc695e 100644
+--- a/bridge/build_new_map.py
++++ b/bridge/build_new_map.py
+@@ -10,6 +10,8 @@ from pathlib import Path
+ 
+ import rclpy
+ from jie_map_msgs.srv import SaveNavigationMapPackage
++from octomap_msgs.msg import Octomap
++from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+ 
+ 
+ def main():
+@@ -56,18 +58,51 @@ def main():
+         )
+         if not client.wait_for_service(timeout_sec=30):
+             raise RuntimeError("Map package service unavailable")
+-        deadline = time.monotonic() + 120
++        # The PCD node republishes the full map every second. The planner needs
++        # much longer to preprocess it; stop the offline publisher after all
++        # subscribers have received one map so export can finish.
++        map_received = [False]
++        qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
++                         durability=DurabilityPolicy.TRANSIENT_LOCAL)
++        subscription = node.create_subscription(
++            Octomap, "/octomap", lambda _msg: map_received.__setitem__(0, True), qos
++        )
++        receive_deadline = time.monotonic() + 180
++        while not map_received[0] and time.monotonic() < receive_deadline:
++            if any(process.poll() is not None for process in processes):
++                raise RuntimeError("Offline map builder exited before publishing OctoMap")
++            rclpy.spin_once(node, timeout_sec=1)
++        if not map_received[0]:
++            raise RuntimeError("Offline OctoMap was not published within 180 seconds")
++        time.sleep(2)
++        if processes[0].poll() is None:
++            os.killpg(processes[0].pid, signal.SIGINT)
++            processes[0].wait(timeout=15)
++        node.destroy_subscription(subscription)
++        print("Offline OctoMap received; stopped repeated PCD publishing", flush=True)
++
++        deadline = time.monotonic() + 300
+         result = None
+         while time.monotonic() < deadline:
+             request = SaveNavigationMapPackage.Request()
+             request.package_path = str(args.package)
+             request.overwrite = False
+             future = client.call_async(request)
+-            rclpy.spin_until_future_complete(node, future, timeout_sec=10)
+-            if future.done():
++            rclpy.spin_until_future_complete(node, future, timeout_sec=80)
++            if not future.done():
++                client.remove_pending_request(future)
++            else:
+                 result = future.result()
+                 if result and result.success:
+                     break
++                if result and result.message not in (
++                    "octomap not ready", "octomap message not received yet",
++                    "preblocked marker not received yet",
++                    "traversable marker not received yet",
++                    "risk cost cloud not received yet",
++                    "planner export service timed out",
++                ):
++                    raise RuntimeError(f"Map package save failed: {result.message}")
+             time.sleep(2)
+         if result is None or not result.success:
+             raise RuntimeError(f"Map package save failed: {getattr(result, 'message', 'timeout')}")
+diff --git a/bridge/start_real_controller.sh b/bridge/start_real_controller.sh
+index 28a6827..62b8146 100644
+--- a/bridge/start_real_controller.sh
++++ b/bridge/start_real_controller.sh
+@@ -5,7 +5,7 @@ if [ "${REAL_BASE_FRAME:-}" != robot_base_link ]; then
+   exit 1
+ fi
+ source /opt/ros/humble/setup.bash
+-source ${HOME}/odin_nav_integration/nav_ws/install/setup.bash
++source "${ODIN_ROOT:-$HOME/odin_nav_integration}/nav_ws/install/setup.bash"
+ export ROS_DOMAIN_ID=90 ROS_LOCALHOST_ONLY=0
+ exec ros2 run octo_planner d1_controller --ros-args \
+   -r __node:=real_controller -p use_sim_time:=false \
+diff --git a/nav_ws/src/jie_3d_nav-main/jie_octomap/web/main.js b/nav_ws/src/jie_3d_nav-main/jie_octomap/web/main.js
+index 092445a..cf9c7fa 100644
+--- a/nav_ws/src/jie_3d_nav-main/jie_octomap/web/main.js
++++ b/nav_ws/src/jie_3d_nav-main/jie_octomap/web/main.js
+@@ -44,13 +44,37 @@ const cloudByteLimit = 16 * 1024 * 1024;
+ toggleOdinCloud.checked = cloudOnly;
+ document.body.toggleAttribute("data-cloud-only", cloudOnly);
+ 
++const consolePlanner = window.location.pathname.startsWith("/planner/");
++function reportPlanner(state, detail = "") {
++  if (consolePlanner) {
++    window.parent.postMessage({ source: "odin3d-planner", state, detail }, window.location.origin);
++  }
++}
++let consoleCanPlan = false;
++if (consolePlanner) {
++  window.addEventListener("message", (event) => {
++    if (event.source !== window.parent || event.origin !== window.location.origin ||
++        event.data?.source !== "odin3d-console") return;
++    consoleCanPlan = event.data.canPlan === true;
++    for (const button of [setNavigateBtn, setStartBtn, setGoalBtn]) button.disabled = !consoleCanPlan;
++    if (!consoleCanPlan) setPlacementMode(null);
++  });
++  for (const button of [setNavigateBtn, setStartBtn, setGoalBtn]) button.disabled = true;
++}
+ function defaultRosbridgeUrl() {
++  if (consolePlanner) {
++    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
++    return protocol + "://" + window.location.host + "/planner/socket" + (cloudOnly ? "?preview=odin" : "");
++  }
+   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+   const port = query.get("ws_port") || "9090";
+   return `${protocol}://${window.location.hostname || "localhost"}:${port}`;
+ }
+ 
+ wsInput.value = defaultRosbridgeUrl();
++if (consolePlanner) {
++  document.body.classList.add("console-planner");
++}
+ 
+ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+@@ -634,6 +658,7 @@ function setPath(pathMsg) {
+   }
+ 
+   if (!pathMsg.poses || pathMsg.poses.length < 2) {
++    reportPlanner("error", "规划器未给出可显示的路径，请核对起终点和同层可通行区。");
+     return;
+   }
+ 
+@@ -661,7 +686,11 @@ function setPath(pathMsg) {
+   });
+   pathObject = new THREE.Mesh(geometry, material);
+   scene.add(pathObject);
+-  scheduleNavigationConfirmation(pathMsg);
++  if (consolePlanner) {
++    reportPlanner("planned", "路径已显示，共 " + points.length + " 个路径点。");
++  } else {
++    scheduleNavigationConfirmation(pathMsg);
++  }
+ }
+ 
+ function setTrackingPoint(marker) {
+@@ -728,6 +757,7 @@ function scheduleNavigationConfirmation(pathMsg) {
+ }
+ 
+ function publishStartNavigation(shouldStart) {
++  if (consolePlanner) return;
+   if (shouldStart && manualReady) {
+     disarmWebManual();
+   }
+@@ -808,6 +838,7 @@ function disarmWebManual() {
+ }
+ 
+ function toggleWebManual() {
++  if (consolePlanner) return;
+   if (manualReady) {
+     disarmWebManual();
+     setSelectionStatus("已退出网页手动。");
+@@ -828,6 +859,7 @@ function toggleWebManual() {
+ }
+ 
+ function stopNavigation() {
++  if (consolePlanner) return;
+   disarmWebManual();
+   if (!stopNavigationTopic) {
+     setSelectionStatus("ROSBridge 未连接，无法发送停止导航命令。");
+@@ -1480,6 +1512,7 @@ function refreshLayerVisibility() {
+ }
+ 
+ function publishStartPose(intersectionPoint, yaw) {
++  if (consolePlanner && !consoleCanPlan) return;
+   if (!startTopic) {
+     setSelectionStatus("ROSBridge 未连接。");
+     return;
+@@ -1514,10 +1547,12 @@ function publishCurrentPose(intersectionPoint, yaw) {
+ }
+ 
+ function publishGoalPose(intersectionPoint, yaw) {
++  if (consolePlanner && !consoleCanPlan) return;
+   if (!goalTopic || !goalPoseTopic) {
+     setSelectionStatus("ROSBridge 未连接。");
+     return;
+   }
++  reportPlanner("target", "已选择目标，正在等待规划结果。");
+   goalTopic.publish(makePointStamped(intersectionPoint.x, intersectionPoint.y, intersectionPoint.z));
+   goalPoseTopic.publish(makePoseStamped(intersectionPoint.x, intersectionPoint.y, intersectionPoint.z, yaw));
+   setPointVisual("goal", intersectionPoint, yaw);
+@@ -1527,6 +1562,7 @@ function publishGoalPose(intersectionPoint, yaw) {
+ }
+ 
+ function publishNavigationGoal(intersectionPoint, yaw) {
++  if (consolePlanner && !consoleCanPlan) return;
+   if (!startTopic || !goalTopic || !goalPoseTopic || !startNavigationTopic) {
+     setSelectionStatus("ROSBridge 未连接。");
+     return;
+@@ -1537,6 +1573,7 @@ function publishNavigationGoal(intersectionPoint, yaw) {
+     return;
+   }
+   publishStartNavigation(false);
++  reportPlanner("target", "已选择目标，正在等待规划结果。");
+   pendingNavigationGoal = {
+     goal: { x: intersectionPoint.x, y: intersectionPoint.y, z: intersectionPoint.z },
+     yaw,
+@@ -1549,7 +1586,7 @@ function publishNavigationGoal(intersectionPoint, yaw) {
+   setPointVisual("start", { x: robotPose.x, y: robotPose.y, z: robotPose.z }, robotPose.yaw);
+   setPointVisual("goal", intersectionPoint, yaw);
+   setSelectionStatus(
+-    `导航目标已设置：[${intersectionPoint.x.toFixed(2)}, ${intersectionPoint.y.toFixed(2)}, ${intersectionPoint.z.toFixed(2)}]，朝向 ${(yaw * 180 / Math.PI).toFixed(1)}°。正在规划路径，路径显示后请确认是否开始导航。`,
++    `导航目标已设置：[${intersectionPoint.x.toFixed(2)}, ${intersectionPoint.y.toFixed(2)}, ${intersectionPoint.z.toFixed(2)}]，朝向 ${(yaw * 180 / Math.PI).toFixed(1)}°。${consolePlanner ? "正在规划路径。" : "正在规划路径，路径显示后请确认是否开始导航。"}`,
+   );
+ }
+ 
+@@ -1651,6 +1688,7 @@ function connectRosbridge(url = wsInput.value.trim(), manual = false) {
+   ros.on("connection", () => {
+     if (ros !== connection) return;
+     setConnectionStatus("已连接");
++    reportPlanner("connected");
+     advancedSettings.open = false;
+     syncOdinCloudSubscription();
+     if (cloudOnly) return;
+@@ -1692,8 +1730,11 @@ function connectRosbridge(url = wsInput.value.trim(), manual = false) {
+     manualEnableTopic = new ROSLIB.Topic({
+       ros, name: "/dog_bridge/manual_enable", messageType: "std_msgs/Bool",
+     });
+-    for (const topic of [startTopic, goalTopic, goalPoseTopic, startNavigationTopic,
+-                         stopNavigationTopic, dogBridgeStopTopic, cmdVelTopic, manualEnableTopic]) {
++    const writableTopics = consolePlanner
++      ? [startTopic, goalTopic, goalPoseTopic]
++      : [startTopic, goalTopic, goalPoseTopic, startNavigationTopic, stopNavigationTopic,
++         dogBridgeStopTopic, cmdVelTopic, manualEnableTopic];
++    for (const topic of writableTopics) {
+       topic.advertise();
+     }
+     initialPoseTopic = new ROSLIB.Topic({
+@@ -1783,6 +1824,7 @@ function connectRosbridge(url = wsInput.value.trim(), manual = false) {
+   ros.on("error", (error) => {
+     if (ros !== connection) return;
+     setConnectionStatus("错误");
++    reportPlanner("offline");
+     setSelectionStatus(`ROSBridge 错误：${error}`);
+     advancedSettings.open = true;
+   });
+@@ -1792,6 +1834,7 @@ function connectRosbridge(url = wsInput.value.trim(), manual = false) {
+     disarmWebManual();
+     manualEnableTopic = null;
+     setConnectionStatus("未连接");
++    reportPlanner("offline");
+     startTopic = null;
+     goalTopic = null;
+     goalPoseTopic = null;
+diff --git a/nav_ws/src/jie_3d_nav-main/jie_octomap/web/styles.css b/nav_ws/src/jie_3d_nav-main/jie_octomap/web/styles.css
+index 23f947e..c04ff04 100644
+--- a/nav_ws/src/jie_3d_nav-main/jie_octomap/web/styles.css
++++ b/nav_ws/src/jie_3d_nav-main/jie_octomap/web/styles.css
+@@ -451,3 +451,16 @@ button {
+ [data-cloud-only] .status-block div:has(#map-status) {
+   display: none;
+ }
++
++body.console-planner .joystick-card,
++body.console-planner #stop-navigation-btn,
++body.console-planner #advanced-settings {
++  display: none;
++}
++
++@media (max-width: 700px) {
++  body.console-planner .shell { display: flex; flex-direction: column-reverse; min-height: 100%; }
++  body.console-planner .viewport-wrap { height: 55vh; min-height: 0; flex: none; }
++  body.console-planner #viewport { min-height: 0; }
++  body.console-planner .panel { width: auto; max-height: 40vh; overflow: auto; }
++}
+diff --git a/nav_ws/src/jie_3d_nav-main/octo_planner/launch/web_test.launch.py b/nav_ws/src/jie_3d_nav-main/octo_planner/launch/web_test.launch.py
+index e7c334f..b2f77dd 100644
+--- a/nav_ws/src/jie_3d_nav-main/octo_planner/launch/web_test.launch.py
++++ b/nav_ws/src/jie_3d_nav-main/octo_planner/launch/web_test.launch.py
+@@ -52,16 +52,26 @@ def load_bool_config(config_path: str, key: str, default: bool) -> str:
+ 
+ 
+ def get_rosbridge_wifi_address():
++    from ipaddress import IPv4Address
+     import subprocess
++
++    configured = os.environ.get("ODIN_ACTIVE_WEB_ADDRESS")
++    if configured:
++        return str(IPv4Address(configured))
++
++    interface = os.environ.get("ODIN_WIFI_IFACE", "wlP1p1s0")
+     output = subprocess.check_output(
+-        ["ip", "-4", "-o", "addr", "show", "dev", "wlP1p1s0"],
++        ["ip", "-4", "-o", "addr", "show", "dev", interface, "scope", "global"],
+         text=True,
+     )
+-    addresses = {part.split("/")[0] for part in output.split() if "/" in part}
+-    for address in ("192.168.50.1", "192.168.10.69"):
+-        if address in addresses:
+-            return address
+-    raise RuntimeError("Wireless interface has no approved Odin address")
++    addresses = {line.split()[3].split("/")[0] for line in output.splitlines() if line}
++    requested = os.environ.get("ODIN_WIFI_IP")
++    if requested:
++        addresses.intersection_update({requested})
++    if len(addresses) != 1:
++        raise RuntimeError("Select one IPv4 address assigned to the wireless interface")
++    return str(IPv4Address(addresses.pop()))
++
+ 
+ def generate_launch_description():
+     octo_planner_share = get_package_share_directory("octo_planner")
+diff --git a/odin_onekey_mapping/common.sh b/odin_onekey_mapping/common.sh
+index f94c0d0..f6ceb5b 100755
+--- a/odin_onekey_mapping/common.sh
++++ b/odin_onekey_mapping/common.sh
+@@ -1,11 +1,12 @@
+ #!/usr/bin/env bash
+ set -Eeuo pipefail
+-ROOT="$HOME/odin_nav_integration"
++source "$HERE/../odin3d-settings.sh"
++ROOT="$ODIN_ROOT"
+ STATE="$ROOT/onekey_mapping_state"
+-MAP_ROOT="$HOME/maps"
++MAP_ROOT="$ODIN_MAP_ROOT"
+ LOG_ROOT="$ROOT/onekey_mapping_logs"
+-SOURCE_CONFIG="$HOME/odin_ws/src/odin_ros_driver/config/control_command.yaml"
+-INSTALL_CONFIG="$HOME/odin_ws/install/odin_ros_driver/share/odin_ros_driver/config/control_command.yaml"
++SOURCE_CONFIG="$ODIN_WS/src/odin_ros_driver/config/control_command.yaml"
++INSTALL_CONFIG="$ODIN_WS/install/odin_ros_driver/share/odin_ros_driver/config/control_command.yaml"
+ SESSION="odin_mapping"
+ NAV_SESSION="odin_real_nav"
+ info(){ echo "[建图] $*"; }
+@@ -13,7 +14,7 @@ fail(){ echo "[错误] $*" >&2; exit 1; }
+ load_ros(){
+   set +u
+   source /opt/ros/humble/setup.bash
+-  source "$HOME/odin_ws/install/setup.bash"
++  source "$ODIN_WS/install/setup.bash"
+   export ROS_DOMAIN_ID=90 ROS_LOCALHOST_ONLY=0
+   set -u
+ }
+diff --git a/odin_onekey_mapping/run_mapping_driver.sh b/odin_onekey_mapping/run_mapping_driver.sh
+index 21e530c..97db8dc 100755
+--- a/odin_onekey_mapping/run_mapping_driver.sh
++++ b/odin_onekey_mapping/run_mapping_driver.sh
+@@ -1,9 +1,11 @@
+ #!/usr/bin/env bash
+ set -Eeuo pipefail
++HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++source "$HERE/../odin3d-settings.sh"
+ LOG="${1:?必须传入日志路径}"
+ set +u
+ source /opt/ros/humble/setup.bash
+-source "$HOME/odin_ws/install/setup.bash"
++source "$ODIN_WS/install/setup.bash"
+ set -u
+ export ROS_DOMAIN_ID=90 ROS_LOCALHOST_ONLY=0
+ exec > >(tee -a "$LOG") 2>&1
+diff --git a/odin_onekey_mapping/save_mapping.sh b/odin_onekey_mapping/save_mapping.sh
+index 8d71be5..b01dc7e 100755
+--- a/odin_onekey_mapping/save_mapping.sh
++++ b/odin_onekey_mapping/save_mapping.sh
+@@ -4,6 +4,8 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ source "$HERE/common.sh"
+ lock_state
+ read_state
++[[ -z "${ODIN_EXPECT_MAPPING_RUN:-}" || "${BACKUP_DIR:-}" == "$ODIN_EXPECT_MAPPING_RUN" ]] ||
++  fail '建图会话已变化，请刷新状态'
+ [[ -n "${BACKUP_DIR:-}" ]] || fail '旧会话未加载本次输出目录。确认旧地图已保存后，执行 stop_mapping.sh --discard，再重新建图'
+ if [[ -s "$RECEIPT" ]]; then
+   CAND="$(cat -- "$RECEIPT")"
+@@ -13,6 +15,7 @@ if [[ -s "$RECEIPT" ]]; then
+ fi
+ driver_loaded_mapping || fail "驱动日志未确认本次建图模式和输出目录：$LOG"
+ tmux has-session -t "=$SESSION" 2>/dev/null || fail '建图进程不在运行'
++require_session_owner "$SESSION" "$BACKUP_DIR"
+ 
+ PENDING="$BACKUP_DIR/save_log_offset"
+ if [[ ! -f "$PENDING" ]]; then
+@@ -42,6 +45,7 @@ else
+ fi
+ [[ "$OFFSET" =~ ^[0-9]+$ ]] || fail "无效的日志偏移：$PENDING"
+ 
++info '等待 BIN 传输完成'
+ LAST='' STABLE=0
+ for ((i = 0; i < 180; i++)); do
+   [[ "$(stat -c '%s' -- "$LOG")" -ge "$OFFSET" ]] || fail "驱动日志已被截断：$LOG"
+@@ -54,6 +58,7 @@ for ((i = 0; i < 180; i++)); do
+     END { if (path != "") print path }
+   ')"
+   if verified_map "$CAND" && SIGNATURE="$(stat -c '%d:%i:%s:%y' -- "$CAND")"; then
++    if [[ -z "$LAST" ]]; then info '正在核对 BIN 文件大小是否稳定'; fi
+     if [[ "$CAND:$SIGNATURE" == "$LAST" ]]; then
+       STABLE=$((STABLE + 1))
+     else
+diff --git a/odin_onekey_mapping/start_mapping.sh b/odin_onekey_mapping/start_mapping.sh
+index b17b55a..7bd3744 100755
+--- a/odin_onekey_mapping/start_mapping.sh
++++ b/odin_onekey_mapping/start_mapping.sh
+@@ -4,10 +4,12 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ source "$HERE/common.sh"
+ command -v tmux >/dev/null || fail '请先安装 tmux：sudo apt install tmux'
+ lock_state
+-[[ -d "$HOME/odin_ws/install" ]] || fail '缺少 odin_ws/install'
++[[ -d "$ODIN_WS/install" ]] || fail '缺少 odin_ws/install'
+ [[ ! -f "$STATE/active.env" ]] || fail "发现未结束的建图会话。先运行 status_mapping.sh 或 stop_mapping.sh"
+ if tmux has-session -t "$SESSION" 2>/dev/null; then fail "建图 tmux session 已存在"; fi
+ if tmux has-session -t "$NAV_SESSION" 2>/dev/null; then fail "导航一键启动仍运行。请先安全停止导航并检查机器狗"; fi
++[[ ! -e "$ROOT/onekey_nav_state/active" && ! -L "$ROOT/onekey_nav_state/active" ]] ||
++  fail '上次导航配置仍待恢复'
+ load_ros
+ if check_odin_process; then fail 'Odin1 驱动正在运行，不能同时启动第二份（导航和建图必须分离）'; fi
+ if ps -eo args | grep -E '[d]og_sdk_bridge.py --execute|[s]tart_real_controller.sh' >/dev/null; then
+@@ -15,6 +17,7 @@ if ps -eo args | grep -E '[d]og_sdk_bridge.py --execute|[s]tart_real_controller.
+ fi
+ SOURCE_TARGET="$(realpath -e -- "$SOURCE_CONFIG")" || fail "找不到驱动配置：$SOURCE_CONFIG"
+ INSTALL_TARGET="$(realpath -e -- "$INSTALL_CONFIG")" || fail "找不到 Launch 配置：$INSTALL_CONFIG"
++require_isolated_configs "$SOURCE_TARGET" "$INSTALL_TARGET"
+ CONFIG_TARGETS=("$SOURCE_TARGET")
+ if [[ "$INSTALL_TARGET" != "$SOURCE_TARGET" ]]; then
+   [[ ! "$INSTALL_TARGET" -ef "$SOURCE_TARGET" ]] || fail '两份配置互为硬链接，无法独立恢复'
+@@ -27,6 +30,7 @@ for target in "${CONFIG_TARGETS[@]}"; do
+   [[ "$MODE" == 2 ]] || fail "预期导航配置 custom_map_mode=2，实际=${MODE:-空}：$target"
+ done
+ 
++[[ "$MAP_ROOT" =~ ^/[A-Za-z0-9_./-]+$ ]] || fail '建图目录需要是绝对路径，并且只含英文、数字、点、下划线或连字符'
+ mkdir -p -- "$MAP_ROOT" "$LOG_ROOT"
+ DEST="$(mktemp -d -- "$MAP_ROOT/odin_scan_$(date +%Y%m%d_%H%M%S)_XXXXXX")"
+ STAMP="${DEST##*/odin_scan_}"
+@@ -41,6 +45,7 @@ done
+ # Publish recovery state before changing either config.
+ ACTIVE_TMP="$(mktemp -- "$STATE/.active.XXXXXXXX")"
+ {
++  printf 'MENU_OWNER=%q\n' "${ODIN_MENU_OWNER:-}"
+   printf 'DEST=%q\n' "$DEST"
+   printf 'LOG=%q\n' "$LOG"
+   printf 'STAMP=%q\n' "$STAMP"
+@@ -59,7 +64,8 @@ done
+ info "建图配置已备份：$BACKUP_DIR"
+ info "新地图目录：$DEST"
+ info '启动 Odin1 SLAM 模式（不会启动机器狗运动控制）'
+-tmux new-session -d -s "$SESSION" -n odin bash "$HERE/run_mapping_driver.sh" "$LOG" 9>&-
++tmux new-session -d -s "$SESSION" -n odin -e "ODIN3D_ENV=${ODIN3D_ENV:-}" \
++  -e "ODIN_RUN_OWNER=$BACKUP_DIR" bash "$HERE/run_mapping_driver.sh" "$LOG" 9>&-
+ info '等待驱动节点及本次配置加载日志'
+ found=no
+ for i in $(seq 1 30); do
+@@ -75,6 +81,11 @@ if [[ "$found" != yes ]]; then
+   info "使用 stop_mapping.sh --discard 恢复旧配置（确认没有需要保存的数据后）"
+   exit 2
+ fi
++if ss -H -lnt 'sport = :9090' | grep . >/dev/null; then
++  fail '实时点云 WebSocket 9090 已被占用，建图会话待恢复'
++fi
++tmux new-window -d -t "=$SESSION:" -n preview -e "ODIN3D_ENV=$ODIN3D_ENV" \
++  bash "$HERE/run_mapping_preview.sh" 9>&-
+ info '驱动已加载本次建图配置。请先检查 /odin1/odometry 与 /odin1/cloud_slam，再开始慢速采集'
+ info "采集结束执行：$HERE/save_mapping.sh"
+ info '全程保持人工监护，不自动使能机器狗行走'
+diff --git a/odin_onekey_mapping/stop_mapping.sh b/odin_onekey_mapping/stop_mapping.sh
+index 5c7a131..da8ba94 100755
+--- a/odin_onekey_mapping/stop_mapping.sh
++++ b/odin_onekey_mapping/stop_mapping.sh
+@@ -4,6 +4,12 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ source "$HERE/common.sh"
+ lock_state
+ read_state
++if [[ -n "${ODIN_EXPECT_MENU_OWNER:-}" && "${MENU_OWNER:-}" != "$ODIN_EXPECT_MENU_OWNER" ]]; then
++  fail '建图会话不属于正在退出的菜单'
++fi
++if [[ -n "${ODIN_EXPECT_MAPPING_RUN:-}" && "${BACKUP_DIR:-}" != "$ODIN_EXPECT_MAPPING_RUN" ]]; then
++  fail '建图会话已变化，请重新核对本次地图'
++fi
+ case "${1:-}" in
+   '') ;;
+   --discard) ;;
+@@ -31,14 +37,19 @@ else
+   cp -p -- "$STATE/control_command.before_mapping.yaml" "$ARCHIVE/0.original.yaml"
+   write_mapping_config "$ARCHIVE/0.original.yaml" "$ARCHIVE/0.mapping.yaml"
+ fi
++require_isolated_configs "${CONFIG_TARGETS[@]}"
+ for i in "${!CONFIG_TARGETS[@]}"; do
+   [[ -s "$ARCHIVE/$i.original.yaml" && -s "$ARCHIVE/$i.mapping.yaml" ]] ||
+     fail "缺少配置备份：${CONFIG_TARGETS[i]}"
+ done
+ 
+-info '停止建图驱动（不会向机器狗发送运动指令）'
++info '请求结束建图并恢复配置'
+ if tmux has-session -t "=$SESSION" 2>/dev/null; then
+-  tmux send-keys -t "$SESSION":odin C-c
++  require_session_owner "$SESSION" "${BACKUP_DIR:-}"
++  if tmux list-panes -t "=$SESSION:preview" >/dev/null 2>&1; then
++    tmux send-keys -t "=$SESSION:preview" C-c
++  fi
++  tmux send-keys -t "=$SESSION:odin" C-c
+   for i in $(seq 1 15); do
+     if ! tmux has-session -t "=$SESSION" 2>/dev/null; then break; fi
+     sleep 1
+diff --git a/odin_onekey_nav/arm_nav.sh b/odin_onekey_nav/arm_nav.sh
+index c68b01e..0e8726b 100755
+--- a/odin_onekey_nav/arm_nav.sh
++++ b/odin_onekey_nav/arm_nav.sh
+@@ -2,18 +2,31 @@
+ set -Eeuo pipefail
+ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ source "$HERE/common.sh"
+-[[ $# == 0 && -t 0 ]] || fail '请在现场终端交互确认'
++web_approved=no
++if [[ $# == 1 && "$1" == --web-approved && -n "${ODIN_WEB_APPROVAL_RUN:-}" ]]; then
++  web_approved=yes
++elif [[ $# != 0 || ! -t 0 ]]; then
++  fail '请在现场终端交互确认，或由受控 Web 后端确认'
++fi
+ read_state
+ reviewed_run="$RUN_DIR"
+ info "当前地图：$MAP_BIN"
+ info '请先在网页确认实际位姿、同层路径、周围空间和物理急停。下一步会接管 SDK 并进入零速 walking'
+-read -r -p '现场条件已确认后输入 READY：' answer
+-[[ "$answer" == READY ]] || fail '未确认现场条件'
++if [[ "$web_approved" == yes ]]; then
++  [[ "$ODIN_WEB_APPROVAL_RUN" == "$reviewed_run" ]] || fail '网页确认的导航会话已变化'
++  info '已收到受控 Web 后端的现场负责人确认'
++else
++  read -r -p '现场条件已确认后输入 READY：' answer
++  [[ "$answer" == READY ]] || fail '未确认现场条件'
++fi
+ lock_state
+ guard_mapping
+ read_state
+ [[ "$RUN_DIR" == "$reviewed_run" ]] || fail '导航会话已变化，请重新核对现场'
+ tmux has-session -t "=$SESSION" 2>/dev/null || fail '导航 tmux 会话未运行'
++require_session_owner "$SESSION" "$RUN_DIR"
++require_vendor_access || fail '请先检查厂商授权与 SDK'
++[[ -n "$DOG_DEVICE_ID" ]] || fail '请负责人在私有环境设置 DOG_DEVICE_ID'
+ load_ros
+ check_readiness 2
+ 
+@@ -38,4 +51,4 @@ if ! window_running sdk; then
+   start_component sdk
+ fi
+ wait_for 20 sdk_ready || fail "SDK 未确认零速就绪：$LOG_DIR/sdk.log"
+-info 'SDK 已报告 enabled=False。现场确认后，在 Web 开始导航，并在终端人工使能速度'
++info 'SDK 已报告 enabled=False；请在 Web 核对规划路径，再独立点击开始导航'
+diff --git a/odin_onekey_nav/common.sh b/odin_onekey_nav/common.sh
+index 2cafca6..f7cb9b4 100755
+--- a/odin_onekey_nav/common.sh
++++ b/odin_onekey_nav/common.sh
+@@ -1,12 +1,13 @@
+ #!/usr/bin/env bash
+ set -Eeuo pipefail
+-ROOT="${HOME}/odin_nav_integration"
++source "$HERE/../odin3d-settings.sh"
++ROOT="$ODIN_ROOT"
+ BRIDGE="${ROOT}/bridge"
+ NAV_WS="${ROOT}/nav_ws"
+ SESSION="odin_real_nav"
+-SOURCE_CONFIG="$HOME/odin_ws/src/odin_ros_driver/config/control_command.yaml"
+-INSTALL_CONFIG="$HOME/odin_ws/install/odin_ros_driver/share/odin_ros_driver/config/control_command.yaml"
+-MAP_ROOT="$HOME/maps"
++SOURCE_CONFIG="$ODIN_WS/src/odin_ros_driver/config/control_command.yaml"
++INSTALL_CONFIG="$ODIN_WS/install/odin_ros_driver/share/odin_ros_driver/config/control_command.yaml"
++MAP_ROOT="$ODIN_MAP_ROOT"
+ MAPPING_STATE="$ROOT/onekey_mapping_state"
+ NAV_STATE="$ROOT/onekey_nav_state"
+ ACTIVE="$NAV_STATE/active"
+@@ -16,7 +17,7 @@ load_ros() {
+   set +u
+   # shellcheck disable=SC1091
+   source /opt/ros/humble/setup.bash
+-  source "${HOME}/odin_ws/install/setup.bash"
++  source "$ODIN_WS/install/setup.bash"
+   source "${NAV_WS}/install/setup.bash"
+   export ROS_DOMAIN_ID=90 ROS_LOCALHOST_ONLY=0
+   set -u
+@@ -51,9 +52,14 @@ window_running() {
+ start_component() {
+   local component="$1"
+   if [[ "$component" == odin ]]; then
+-    tmux new-session -d -s "$SESSION" -n odin bash "$HERE/run_component.sh" odin "$LOG_DIR" 9>&-
++    tmux new-session -d -s "$SESSION" -n odin \
++      -e "ODIN3D_ENV=${ODIN3D_ENV:-}" \
++      -e "ODIN_RUN_OWNER=$RUN_DIR" bash "$HERE/run_component.sh" odin "$LOG_DIR" 9>&-
+   else
+-    tmux new-window -d -t "=$SESSION:" -n "$component" bash "$HERE/run_component.sh" "$component" "$LOG_DIR" 9>&-
++    require_session_owner "$SESSION" "$RUN_DIR"
++    local -a env_args=(-e "ODIN3D_ENV=$ODIN3D_ENV")
++    if [[ "$component" == sdk ]]; then env_args+=(-e "DOG_DEVICE_ID=$DOG_DEVICE_ID"); fi
++    tmux new-window -d -t "=$SESSION:" -n "$component" "${env_args[@]}" bash "$HERE/run_component.sh" "$component" "$LOG_DIR" 9>&-
+   fi
+ }
+ wait_for() {
+@@ -90,9 +96,9 @@ localization_log_ready() {
+ check_readiness() {
+   local wait="${1:-15}"
+   web_package_loaded || fail "Web 未确认加载本次地图包：$LOG_DIR/web.log"
+-  wait_for 6 curl --fail --silent --output /dev/null --max-time 3 http://192.168.10.69:8080/ ||
++  wait_for 6 curl --fail --silent --output /dev/null --max-time 3 ${ODIN_WEB_TLS_CERT:+--insecure} "http${ODIN_WEB_TLS_CERT:+s}://$WEB_ADDRESS:$ODIN_WEB_PORT/api/health" ||
+     fail 'Web 入口未响应'
+-  ss -H -lnt 'sport = :9090' | grep . >/dev/null || fail 'WebSocket 9090 未监听'
++  ss -H -lnt 'sport = :9090' | awk -v address="127.0.0.1:9090" '$4 == address { found=1 } END { exit !found }' || fail 'WebSocket 9090 未监听'
+   wait_for "$wait" localization_log_ready ||
+     fail "尚未确认驱动加载所选 BIN 并报告重定位：$LOG_DIR/odin.log"
+   /usr/bin/python3 "$HERE/check_localization.py" "$MAP_PACKAGE/octomap_msg.npz" ||
+@@ -118,6 +124,7 @@ restore_configs() {
+   [[ "$(realpath -e -- "$SOURCE_CONFIG")" == "$SOURCE_TARGET" &&
+      "$(realpath -e -- "$INSTALL_CONFIG")" == "$INSTALL_TARGET" ]] ||
+     fail "配置路径已变化，保留备份：$RUN_DIR"
++  require_isolated_configs "$SOURCE_TARGET" "$INSTALL_TARGET"
+   config_targets
+   for i in "${!CONFIG_TARGETS[@]}"; do
+     local target="${CONFIG_TARGETS[i]}"
+diff --git a/odin_onekey_nav/map_package.sh b/odin_onekey_nav/map_package.sh
+index d388ba8..75d7e83 100644
+--- a/odin_onekey_nav/map_package.sh
++++ b/odin_onekey_nav/map_package.sh
+@@ -47,29 +47,31 @@ PY
+ }
+ 
+ prepare_package() {
+-  local hash cache stage original offline_nodes
++  local convert_only="${1:-no}" hash cache stage original offline_nodes converted converted_tmp
+   original="$(stat -c '%d:%i:%s:%y:%z' -- "$MAP_BIN")"
+   hash="$(sha256sum < "$MAP_BIN")"
+   hash="${hash%% *}"
+   MAP_SIGNATURE="$original"
+-  if [[ "$hash" == '20e6bee1f801d790bee8889493b0a80dc589a3f67fdd84292ca36b61c96cf032' ]]; then
++  if [[ -n "$ODIN_LEGACY_BIN_SHA256" && "$hash" == "$ODIN_LEGACY_BIN_SHA256" ]]; then
+     # The PCD build log records map_20261111_173026.pcd as the package input.
+-    MAP_PACKAGE="$ROOT/maps/real_scan_20261111/package_r020"
+-    MAP_PCD="$ROOT/maps/real_scan_20261111/converted/map_20261111_173026.pcd"
++    MAP_PACKAGE="$ODIN_LEGACY_PACKAGE"
++    MAP_PCD="$ODIN_LEGACY_PCD"
+   else
+-    cache="$ROOT/maps/onekey_nav_packages"
++    cache="$ODIN_PACKAGE_CACHE"
+     MAP_PACKAGE="$cache/$hash/package"
+     MAP_PCD="$cache/$hash/map.pcd"
+     if [[ ! -d "$MAP_PACKAGE" ]]; then
+-      offline_nodes="$(ROS_DOMAIN_ID=78 ROS_LOCALHOST_ONLY=1 timeout 8 ros2 node list --no-daemon --spin-time 2)" ||
+-        fail '无法检查离线构建域 78'
+-      [[ -z "$offline_nodes" ]] || fail '离线域 78 正在使用，请结束原离线进程后重试'
+       mkdir -p -- "$cache"
++      converted="$cache/converted/$hash.pcd"
++      if [[ "$convert_only" == yes && -s "$converted" ]]; then info 'PCD 已生成'; return; fi
+       stage="$(mktemp -d -- "$cache/.build.XXXXXXXX")"
+-      info "从本次 BIN 在隔离域 78 生成导航包。构建日志：$stage"
+-      "$ROOT/tools/map_to_ply_arm64_v1.2.0" --format auto --binary "$MAP_BIN" "$stage/map.ply" |
+-        tee "$stage/export.log"
+-      /usr/bin/python3 - "$stage/map.ply" "$stage/map.pcd" <<'PY'
++      if [[ ! -s "$converted" ]]; then
++        info 'BIN → PLY'
++        [[ -x "$ODIN_CONVERTER" ]] || fail "BIN → PLY：缺少厂商转换器 $ODIN_CONVERTER"
++        "$ODIN_CONVERTER" --format auto --binary "$MAP_BIN" "$stage/map.ply" 2>&1 |
++          tee "$stage/export.log" || fail "BIN → PLY 失败：$stage/export.log"
++        info 'PLY → PCD'
++        /usr/bin/python3 - "$stage/map.ply" "$stage/map.pcd" 2>"$stage/pcd.log" <<'PY' || fail "PLY → PCD 失败：$stage/pcd.log"
+ import sys
+ import numpy as np
+ import open3d as o3d
+@@ -82,8 +84,24 @@ if not o3d.io.write_point_cloud(destination, cloud):
+     raise SystemExit('PCD write failed')
+ print(f'{len(cloud.points)} points -> {destination}')
+ PY
++        [[ "$(stat -c '%d:%i:%s:%y:%z' -- "$MAP_BIN")" == "$original" ]] ||
++          fail 'BIN 在转换期间发生变化'
++        mkdir -p -- "$cache/converted"
++        converted_tmp="$(mktemp -- "$cache/converted/.pcd.XXXXXXXX")"
++        cp -- "$stage/map.pcd" "$converted_tmp"
++        mv -nT -- "$converted_tmp" "$converted"
++        [[ ! -e "$converted_tmp" ]] || fail '已有同名 PCD，请负责人核对缓存'
++      else
++        cp -- "$converted" "$stage/map.pcd"
++      fi
++      if [[ "$convert_only" == yes ]]; then info 'PCD 已生成'; return; fi
++      info '正在生成导航地图包'
++      offline_nodes="$(ROS_DOMAIN_ID=78 ROS_LOCALHOST_ONLY=1 timeout 8 ros2 node list --no-daemon --spin-time 2)" ||
++        fail '无法检查离线构建域 78'
++      [[ -z "$offline_nodes" ]] || fail '离线域 78 正在使用，请结束原离线进程后重试'
+       ROS_DOMAIN_ID=78 ROS_LOCALHOST_ONLY=1 /usr/bin/python3 "$BRIDGE/build_new_map.py" \
+-        "$stage/map.pcd" "$stage/package" --min-points 8 --map-id "odin_${hash:0:16}_r020"
++        "$stage/map.pcd" "$stage/package" --min-points 8 --map-id "odin_${hash:0:16}_r020" \
++        >"$stage/package.log" 2>&1 || fail "生成导航地图包失败：$stage/package.log"
+       validate_package "$stage/package" >/dev/null || fail "生成的地图包需要检查：$stage"
+       [[ "$(stat -c '%d:%i:%s:%y:%z' -- "$MAP_BIN")" == "$original" ]] ||
+         fail 'BIN 在转换期间发生变化'
+@@ -93,6 +111,7 @@ PY
+     fi
+   fi
+   [[ -s "$MAP_PCD" ]] || fail "找不到对应的 PCD：$MAP_PCD"
++  if [[ "$convert_only" == yes ]]; then info 'PCD 已生成'; return; fi
+   MAP_ID="$(validate_package "$MAP_PACKAGE")" || fail "无法使用导航包：$MAP_PACKAGE"
+   [[ "$(stat -c '%d:%i:%s:%y:%z' -- "$MAP_BIN")" == "$original" ]] ||
+     fail 'BIN 在校验或准备期间发生变化'
+diff --git a/odin_onekey_nav/run_component.sh b/odin_onekey_nav/run_component.sh
+index 6ecb012..8a9d6de 100755
+--- a/odin_onekey_nav/run_component.sh
++++ b/odin_onekey_nav/run_component.sh
+@@ -16,14 +16,16 @@ case "$component" in
+     if [[ -f "$LOG_DIR/../web_nav_params.yaml" ]]; then
+       export ODIN_WEB_NAV_CONFIG="$LOG_DIR/../web_nav_params.yaml"
+     fi
++    export ODIN_ACTIVE_WEB_ADDRESS=127.0.0.1
+     exec ros2 launch octo_planner web_test.launch.py \
+-      launch_controller:=false launch_planner:=true \
+-      launch_web:="$(if curl -fsS --max-time 2 http://192.168.10.69:8080/mapping.html >/dev/null || \
+-        curl -fsS --max-time 2 http://192.168.50.1:8080/mapping.html >/dev/null; then echo false; else echo true; fi)" \
++      launch_controller:=false launch_planner:=true launch_web:=false \
+       launch_rosbridge:=true launch_rviz:=false ;;
+   controller) export REAL_BASE_FRAME=robot_base_link
+       exec bash "$BRIDGE/start_real_controller.sh" ;;
+-  sdk) exec /usr/bin/python3 "$BRIDGE/dog_sdk_bridge.py" \
+-      --execute --navigation --base-frame robot_base_link ;;
++  sdk)
++      : "${DOG_DEVICE_ID:?请在私有环境设置设备 ID}"
++      exec /usr/bin/python3 "$BRIDGE/dog_sdk_bridge.py" --execute --navigation \
++        --base-frame robot_base_link --iface "$DOG_IFACE" --device-id "$DOG_DEVICE_ID" \
++        --source "$DOG_CONTROL_SOURCE" --lib-dir "$DOG_SDK_LIB_DIR" ;;
+   *) fail "未知组件: $component" ;;
+ esac
+diff --git a/odin_onekey_nav/start_nav.sh b/odin_onekey_nav/start_nav.sh
+index 5d034b9..c9a07a5 100755
+--- a/odin_onekey_nav/start_nav.sh
++++ b/odin_onekey_nav/start_nav.sh
+@@ -4,10 +4,12 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ source "$HERE/common.sh"
+ source "$HERE/map_package.sh"
+ prepare_only=no
++convert_only=no
+ case "${1:-}" in
+   --list) [[ $# == 1 ]] || fail '用法：start_nav.sh --list'; list_maps; exit 0 ;;
++  --convert) [[ $# == 2 ]] || fail '用法：start_nav.sh --convert /path/to/map.bin'; prepare_only=yes; convert_only=yes; shift ;;
+   --prepare) [[ $# == 2 ]] || fail '用法：start_nav.sh --prepare /path/to/map.bin'; prepare_only=yes; shift ;;
+-  --*) fail '用法：start_nav.sh [--list | --prepare BIN | BIN]' ;;
++  --*) fail '用法：start_nav.sh [--list | --convert BIN | --prepare BIN | BIN]' ;;
+ esac
+ (( $# <= 1 )) || fail '请只指定一个 BIN'
+ select_map "${1:-}"
+@@ -17,24 +19,30 @@ guard_mapping
+ [[ -d "$NAV_WS/install" ]] || fail '缺少 nav_ws/install'
+ load_ros
+ if [[ "$prepare_only" == yes ]]; then
+-  prepare_package
++  [[ ! -L "$ACTIVE" && ! -e "$ACTIVE" ]] || fail '请先停止导航再处理地图'
++  prepare_package "$convert_only"
+   exit 0
+ fi
+ [[ ! -e "$ACTIVE" && ! -L "$ACTIVE" ]] || fail "上次导航尚未恢复配置。请先运行 $HERE/stop_nav.sh"
+ if tmux has-session -t "=$SESSION" 2>/dev/null; then fail '一键导航已运行'; fi
+ if odin_running || sdk_running; then fail '发现正在运行的 Odin 或 SDK 进程'; fi
+ [[ -f "$BRIDGE/dog_sdk_bridge.py" && -f "$BRIDGE/start_real_controller.sh" ]] || fail '缺少现有控制脚本'
+-if ! ip -o -4 addr show | grep -F '192.168.10.69/' >/dev/null; then fail 'AGX 当前没有 Web 所需地址 192.168.10.69'; fi
++WEB_ADDRESS="$(resolve_web_address)" || fail '无线网卡无可用地址，请检查 config.env'
+ active="$(timeout 8 ros2 node list)" || fail '无法检查当前 ROS 节点'
+ if grep -Ex '/(host_sdk_sample|odin_cyvet_body_tf|real_controller|dog_sdk_bridge|rosbridge_websocket|jie_path_node|map_package_manager)' <<< "$active" >/dev/null; then
+   fail '发现已有导航节点，请先安全停止原会话'
+ fi
+-if ss -H -lnt | grep -E ':(8080|9090)[[:space:]]' >/dev/null; then fail 'Web 端口 8080 或 9090 已被占用'; fi
++if ss -H -lnt 'sport = :9090' | grep . >/dev/null; then fail 'WebSocket 端口 9090 已被占用'; fi
++[[ "$(curl -fsS --max-time 3 "http${ODIN_WEB_TLS_CERT:+s}://$WEB_ADDRESS:$ODIN_WEB_PORT/api/health" ${ODIN_WEB_TLS_CERT:+--insecure})" == odin3d-console ]] ||
++  fail '请先启动本交付的 Web 控制台'
+ if pgrep -f '[r]os2 topic pub .*/dog_bridge/stop' >/dev/null; then fail '发现残留的 SDK 停止发布进程'; fi
+ 
++info '准备导航地图包'
+ prepare_package
++info '启动重定位服务'
+ SOURCE_TARGET="$(realpath -e -- "$SOURCE_CONFIG")" || fail "找不到驱动配置：$SOURCE_CONFIG"
+ INSTALL_TARGET="$(realpath -e -- "$INSTALL_CONFIG")" || fail "找不到 Launch 配置：$INSTALL_CONFIG"
++require_isolated_configs "$SOURCE_TARGET" "$INSTALL_TARGET"
+ config_targets
+ RUN_DIR="$(mktemp -d -- "$NAV_STATE/nav_$(date +%Y%m%d_%H%M%S)_XXXXXX")"
+ LOG_DIR="$RUN_DIR/logs"
+@@ -84,7 +92,8 @@ done
+   fail '所选 BIN 在启动前发生变化'
+ # Publish the recovery state before replacing either file.
+ {
+-  for name in RUN_DIR LOG_DIR MAP_BIN MAP_PACKAGE MAP_ID SOURCE_TARGET INSTALL_TARGET; do
++  MENU_OWNER="${ODIN_MENU_OWNER:-}"
++  for name in MENU_OWNER WEB_ADDRESS RUN_DIR LOG_DIR MAP_BIN MAP_PACKAGE MAP_ID SOURCE_TARGET INSTALL_TARGET; do
+     printf '%s=%q\n' "$name" "${!name}"
+   done
+ } > "$RUN_DIR/session.env"
+@@ -107,7 +116,12 @@ fi
+ start_component tf
+ wait_for 20 node_present /host_sdk_sample || fail "Odin ROS 节点未出现：$LOG_DIR/odin.log"
+ start_component web
++info '正在等待网页加载地图包'
+ wait_for 35 web_package_loaded || fail "Web 未确认自动加载所选地图包：$LOG_DIR/web.log"
+-info 'Web 导航：http://192.168.10.69:8080'
++# The controller is path-only until an explicit start command; SDK is still absent.
++start_component controller
++wait_for 12 node_present /real_controller || fail "受控规划器未就绪：$LOG_DIR/controller.log"
++info "Web 导航：http${ODIN_WEB_TLS_CERT:+s}://$WEB_ADDRESS:$ODIN_WEB_PORT"
++info '正在验证定位与机体位姿'
+ check_readiness 45
+ info "现场核对位姿、同层规划路径和急停条件后，运行 $HERE/arm_nav.sh"
+diff --git a/odin_onekey_nav/stop_nav.sh b/odin_onekey_nav/stop_nav.sh
+index cd808d4..86dfe7d 100755
+--- a/odin_onekey_nav/stop_nav.sh
++++ b/odin_onekey_nav/stop_nav.sh
+@@ -6,9 +6,20 @@ lock_state
+ guard_mapping
+ if [[ -e "$ACTIVE" || -L "$ACTIVE" ]]; then
+   read_state
++  [[ -z "${ODIN_EXPECT_NAV_RUN:-}" || "$RUN_DIR" == "$ODIN_EXPECT_NAV_RUN" ]] ||
++    fail '导航会话已变化，请刷新状态'
++  if [[ -n "${ODIN_EXPECT_MENU_OWNER:-}" && "${MENU_OWNER:-}" != "$ODIN_EXPECT_MENU_OWNER" ]]; then
++    fail '导航会话不属于正在退出的菜单'
++  fi
++  if tmux has-session -t "=$SESSION" 2>/dev/null; then
++    require_session_owner "$SESSION" "$RUN_DIR"
++  fi
+ elif ! tmux has-session -t "=$SESSION" 2>/dev/null; then
+   info '没有一键导航会话或待恢复的配置'
++  [[ -z "${ODIN_EXPECT_NAV_RUN:-}" ]] || fail '导航会话已变化，请刷新状态'
+   exit 0
++else
++  fail '发现没有本部署恢复记录的导航会话，请联系负责人'
+ fi
+ load_ros
+ send_once() {
+@@ -30,7 +41,7 @@ wait_for 18 sdk_stopped ||
+ 
+ for component in controller web tf odin; do
+   if window_running "$component"; then
+-    tmux send-keys -t "${SESSION}:$component" C-c
++    tmux send-keys -t "=$SESSION:$component" C-c
+   fi
+ done
+ session_stopped() {

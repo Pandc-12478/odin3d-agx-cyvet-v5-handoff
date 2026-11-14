@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Odin3D 控制台</title>
+  <link rel="stylesheet" href="/assets/console.css">
+  <script src="/assets/console.js" defer></script>
+</head>
+<body>
+  <header>
+    <div class="top"><a class="brand" href="#overview">Odin3D</a></div>
+    <div class="signals" id="signals" aria-live="polite"></div>
+    <nav aria-label="控制台页面">
+      <a href="#overview">总览</a><a href="#mapping">三维建图</a><a href="#navigation">自主导航</a>
+      <a href="#maps">地图管理</a><a href="#devices">设备状态</a>
+    </nav>
+  </header>
+  <main>
+    <p id="connection" role="status"></p>
+    <p id="feedback" role="status"></p>
+    <section id="overview" class="page">
+      <h1>总览</h1>
+      <dl class="cards" id="summary"></dl>
+      <div class="actions">
+        <button data-action="mapping-start" disabled>开始建图</button>
+        <a class="button quiet" href="#navigation">进入导航</a>
+      </div>
+    </section>
+    <section id="mapping" class="page" hidden>
+      <h1>三维建图</h1>
+      <p id="mapping-status"></p>
+      <p id="cloud-status">点云状态未知。</p>
+      <iframe id="cloud-preview" title="Odin1 实时点云" hidden></iframe>
+      <div class="actions">
+        <button data-action="mapping-start" disabled>开始建图</button>
+        <button data-action="mapping-save" disabled>保存地图</button>
+        <button data-action="mapping-stop" disabled>结束建图</button>
+        <a class="button quiet" href="#maps">前往地图管理</a>
+      </div>
+      <p id="mapping-job"></p>
+    </section>
+    <section id="navigation" class="page" hidden>
+      <h1>自主导航</h1>
+      <dl class="cards" id="nav-status"></dl>
+      <div class="actions">
+        <a class="button quiet" href="#maps">选择地图</a>
+        <button class="stop" data-action="navigation-stop" disabled>停止导航服务</button>
+      </div>
+      <div class="motion-panel">
+        <h2>运动控制</h2>
+        <p id="motion-status" role="status">运动锁定。</p>
+        <div class="actions">
+          <button id="motion-prepare" disabled>准备运动（零速接管）</button>
+          <button id="motion-start" disabled>开始导航</button>
+          <button id="motion-stop" class="stop" disabled>停止运动</button>
+        </div>
+        <p id="motion-feedback" role="alert"></p>
+      </div>
+      <p>选目标只会规划路径。零速接管可能改变机器狗姿态；网页停止不代替物理急停。</p>
+      <p id="planner-hint"></p>
+      <iframe id="planner" title="三维地图与路径规划" hidden></iframe>
+    </section>
+    <section id="maps" class="page" hidden>
+      <h1>地图管理</h1>
+      <div class="actions">
+        <button data-action="convert" disabled>转换点云</button>
+        <button data-action="prepare" disabled>生成导航地图包</button>
+        <button data-action="load" disabled>加载用于导航</button>
+        <button id="refresh-maps" class="quiet">刷新列表</button>
+      </div>
+      <p id="maps-message"></p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th scope="col">选择地图</th><th scope="col">创建时间</th><th scope="col">BIN</th><th scope="col">PCD</th><th scope="col">规划包</th><th scope="col">当前</th></tr></thead>
+          <tbody id="map-rows"></tbody>
+        </table>
+      </div>
+    </section>
+    <section id="devices" class="page" hidden>
+      <h1>设备状态</h1>
+      <dl class="cards" id="device-status"></dl>
+      <a id="diagnostics" class="button quiet" href="/api/diagnostics" download>导出脱敏诊断</a>
+    </section>
+  </main>
+</body>
+</html>

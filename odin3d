@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+BASE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$BASE/odin3d-settings.sh"
+RUN="$BASE/work"
+PID_FILE="$RUN/web.pid"
+LOG="$RUN/web-server.log"
+LOCK="$RUN/odin3d.lock"
+
+valid_pid() {
+  [[ -s "$PID_FILE" ]] || return 1
+  local pid
+  pid="$(cat "$PID_FILE")"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/cmdline" ]] || return 1
+  tr '\0' ' ' < "/proc/$pid/cmdline" |
+    grep -F -- "$BASE/web/server.py" >/dev/null
+}
+web_url() {
+  local address
+  address="$(resolve_web_address)" || return 1
+  printf 'http%s://%s:%s/\n' "${ODIN_WEB_TLS_CERT:+s}" "$address" "$ODIN_WEB_PORT"
+}
+health() {
+  local url
+  url="$(web_url)" || return 1
+  [[ "$(curl -fsS --max-time 3 ${ODIN_WEB_TLS_CERT:+--insecure} "${url}api/health")" == odin3d-console ]]
+}
+doctor() {
+  bash "$BASE/install.sh" --check
+  printf '\n当前会话\n'
+  if [[ -e "$ODIN_ROOT/onekey_mapping_state/active.env" ]]; then echo '建图会话或恢复记录存在'; fi
+  if [[ -e "$ODIN_ROOT/onekey_nav_state/active" || -L "$ODIN_ROOT/onekey_nav_state/active" ]]; then
+    echo '导航会话或恢复记录存在'
+  fi
+  if command -v ss >/dev/null; then
+    ss -H -lnt "( sport = :$ODIN_WEB_PORT or sport = :9090 )" || true
+  fi
+}
+status() {
+  if valid_pid && health; then
+    printf 'Web 运行中：%s\n' "$(web_url)"
+  elif valid_pid; then
+    echo 'Web 进程存在，入口尚未响应。查看 work/web-server.log'
+  else
+    echo 'Web 未运行'
+  fi
+  if [[ -e "$ODIN_ROOT/onekey_mapping_state/active.env" ]]; then echo '建图会话存在或待恢复'; fi
+  if [[ -e "$ODIN_ROOT/onekey_nav_state/active" || -L "$ODIN_ROOT/onekey_nav_state/active" ]]; then
+    echo '导航会话存在或待恢复'
+  fi
+  if [[ -s "$RUN/web-job.json" ]]; then
+    /usr/bin/python3 -B - "$RUN/web-job.json" <<'PY'
+import json
+import sys
+try:
+    job = json.load(open(sys.argv[1], encoding="utf-8"))
+    print(f"最近任务：{job.get('message', '未知')}（{job.get('status', '未知')}）")
+except (OSError, ValueError):
+    print("最近任务状态未知")
+PY
+  fi
+}
+start() {
+  [[ -f "$RUN/install.complete" ]] || { echo '先运行 bash install.sh 完成首次部署。' >&2; return 2; }
+  if valid_pid; then
+    if health; then status; return 0; fi
+    echo 'Web 进程已存在但未就绪，请查看 work/web-server.log。' >&2
+    return 2
+  fi
+  if [[ -e "$PID_FILE" ]]; then
+    rm -f -- "$PID_FILE"
+  fi
+  require_web_access
+  local address
+  address="$(resolve_web_address)" || { echo '无线地址未确认。' >&2; return 2; }
+  if ss -H -lnt "sport = :$ODIN_WEB_PORT" | grep . >/dev/null; then
+    echo "端口 $ODIN_WEB_PORT 已被占用，请运行 odin3d doctor。" >&2
+    return 2
+  fi
+  bash "$BASE/serve-web.sh" 9>&- >>"$LOG" 2>&1 &
+  local pid=$!
+  printf '%s\n' "$pid" >"$PID_FILE"
+  for _ in {1..30}; do
+    if health; then printf '已启动：%s\n' "$(web_url)"; return 0; fi
+    if ! kill -0 "$pid" 2>/dev/null; then break; fi
+    sleep 1
+  done
+  echo "Web 未就绪，查看 $LOG。确认进程退出后再清理 PID 文件并重试。" >&2
+  return 2
+}
+stop() {
+  if valid_pid && [[ -s "$RUN/web-job.json" ]] &&
+     /usr/bin/python3 -B - "$RUN/web-job.json" <<'PY'
+import json
+import sys
+try:
+    active = json.load(open(sys.argv[1], encoding="utf-8")).get("status") == "running"
+except (OSError, ValueError):
+    active = True
+raise SystemExit(0 if active else 1)
+PY
+  then
+    echo 'Web 任务仍在执行，请等待保存、转换或加载完成后重试停止。' >&2
+    return 2
+  fi
+  if [[ -e "$ODIN_ROOT/onekey_nav_state/active" || -L "$ODIN_ROOT/onekey_nav_state/active" ]]; then
+    bash "$ODIN_ROOT/odin_onekey_nav/stop_nav.sh" || {
+      echo '导航停止或配置恢复未确认，保留 Web 供诊断。' >&2; return 2;
+    }
+  fi
+  if [[ -e "$ODIN_ROOT/onekey_mapping_state/active.env" ]]; then
+    bash "$ODIN_ROOT/odin_onekey_mapping/stop_mapping.sh" || {
+      echo '建图未确认保存或驱动尚未退出。先在 Web 保存 BIN，或由负责人核对后执行原停止流程。' >&2; return 2;
+    }
+  fi
+  if valid_pid; then
+    local pid
+    pid="$(cat "$PID_FILE")"
+    kill -TERM "$pid"
+    for _ in {1..20}; do
+      if ! kill -0 "$pid" 2>/dev/null; then break; fi
+      sleep 1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      echo 'Web 进程尚未退出，保留记录。' >&2
+      return 2
+    fi
+    rm -f -- "$PID_FILE"
+    echo 'Web 已退出。机器人是否安全停止须现场确认。'
+  elif [[ -e "$PID_FILE" ]]; then
+    echo 'PID 记录与进程不匹配，未终止任何进程。' >&2
+    return 2
+  else
+    echo 'Web 未运行'
+  fi
+}
+
+case "${1:-}" in
+  start|stop|status|doctor)
+    mkdir -p -- "$RUN"
+    exec 9>"$LOCK"
+    flock -n 9 || { echo '另一项 Odin3D 管理操作正在进行。' >&2; exit 2; }
+    "$1" ;;
+  *) echo '用法：odin3d start | stop | status | doctor' >&2; exit 2 ;;
+esac
