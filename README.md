@@ -1,6 +1,6 @@
 # Odin3D V5 开发交接
 
-这是 AGX Orin、Odin1 和宇泛灵猫项目在 2026-11-13 的冻结源码。入口为 `odin3d` 和 `install.sh`。
+这是 AGX Orin、Odin1 和宇泛灵猫项目在 2026-11-13 的冻结源码。运行入口为 `odin3d`。`install.sh` 保留冻结版的旧仓库检出步骤，不能直接用于这个仓库的新克隆。接手时先用源码核对 AGX 部署，再按实际设备补齐依赖。
 
 ## 代码从哪里读
 
@@ -16,7 +16,7 @@
 
 ## 当前还需补齐
 
-宇泛 ARM64 SDK、Odin1 厂商二进制库和 BIN 转换工具尚未放进仓库。地图 BIN 超过 GitHub 普通文件大小限制。网页所需的离线 Three.js/ROSLib 文件已放在导航包的 `web/vendor/`。设备 ID、密钥和现场网络配置只应在接手设备本地配置。
+宇泛 ARM64 SDK、Odin1 厂商二进制库和 BIN 转换工具尚未放进这个公开仓库。地图 BIN 超过 GitHub 普通文件大小限制，现场地图不属于公开源码。网页所需的离线 Three.js/ROSLib 文件已放在导航包的 `web/vendor/`。设备 ID、密钥和现场网络配置只应在接手设备本地配置。
 
 仓库的 `work/odin_ws/src/odin_ros_driver/config/control_command.yaml` 已清除旧机器的地图绝对路径。原设备的相机标定参数保留，序列号注释已移除。更换设备须核对标定与外参。
 
