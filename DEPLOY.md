@@ -1,5 +1,19 @@
 # Odin3D 管理员部署与现场验收
 
+## 这次收到的三个依赖文件（2026-11-14）
+
+以下文件已从原 AGX 复制并按 SHA-256 核对；它们属于厂商依赖，尚未上传到公开仓库。接手人需从有权提供这些文件的项目负责人处取得原件。这里的哈希只用于核对版本，不能代替厂商授权。
+
+| 文件 | 用途及部署位置 | SHA-256 |
+| --- | --- | --- |
+| `liblydHostApi_arm.a` | Odin1 驱动链接库，放入 `work/odin_ws/src/odin_ros_driver/lib/` | `bee75293de255403707cc198a7fb93ee7d2159a8e5368644eec22ec0c1cd8b56` |
+| `map_to_ply_arm64_v1.2.0` | AGX 上运行的 ARM64 BIN 转换程序；原路径 `/home/shjshz/odin3d-v5/private/map_to_ply_arm64_v1.2.0`，部署时由 `ODIN_CONVERTER` 指向可执行文件 | `40fbec29fce350071e4450190d23fe4ce9d1e7459e615eaa0a2cd0d23976e7fa` |
+| `robot_motion_sdk/__init__.py` | 宇泛 Python 包的接口文件，原路径 `/home/shjshz/.local/lib/python3.10/site-packages/robot_motion_sdk/__init__.py` | `744dea6af792dc263b27eca5b7722e9218b882edca919bd8bf89760faeb2fff3` |
+
+宇泛 `__init__.py` 单独不能运行，还依赖同一包内的 `_uniubi_robot_motion_py_native*.so`、`media_frame.py` 和 ARM64 SDK 的 `librobotMotionSdk.so` 等库；原 AGX 的较早依赖清单记录了这些文件。转换程序复制到 AGX 后需要执行权限（`chmod +x`）。这些文件仅在 ARM64 AGX 环境检查，未在本工作区运行。
+
+**当前仓库安装说明的限制：**冻结版 `install.sh` 仍按旧仓库地址与旧提交检出 `work/`，直接在本仓库的新克隆上执行，不能得到这份冻结源码的可复现部署。先对照本仓库源码和原 AGX 部署核实目录与依赖；修复安装器并在隔离 AGX 上验证后，才能将下文的安装步骤作为可执行指引。
+
 ## 本项目自带
 
 交付目录自带五个中文页面、受控 Web API、`odin3d` 与 `install.sh`、建图和地图处理兼容脚本、`integration.patch`、原 `jie_3d_nav` 三维页面接入方式，以及零速准备、独立开始、受控停止与心跳锁定流程。安装器在隔离 `work/` 获取固定版本源码、应用补丁并编译；失败可补齐依赖后重跑。地图、厂商 SDK 库、设备 ID、授权文件和私有 `config.env` 不在源码包中。原 V4 与生产部署不参与安装。
@@ -12,7 +26,7 @@
 
 ## 安装与维护
 
-将交付目录放在独立用户目录，执行 `bash install.sh`。首次运行若生成 `config.env` 后退出，由负责人按提示填写必要配置、厂商授权与资源路径，设权限 600，再执行 `bash install.sh`。完成后运行 `./odin3d start`，使用输出的实际网址。`./odin3d status`、`./odin3d doctor`、`./odin3d stop` 用于维护。Web 不要求访问码，**只可在负责人控制的实验室网络开放**；其他网络使用匹配访问地址的 TLS 和网络访问限制。不要把原生产目录或 V4 目录作为安装目标。
+安装器修复并验证后，将交付目录放在独立用户目录，执行 `bash install.sh`。首次运行若生成 `config.env` 后退出，由负责人按提示填写必要配置、厂商授权与资源路径，设权限 600，再执行 `bash install.sh`。完成后运行 `./odin3d start`，使用输出的实际网址。`./odin3d status`、`./odin3d doctor`、`./odin3d stop` 用于维护。Web 不要求访问码，**只可在负责人控制的实验室网络开放**；其他网络使用匹配访问地址的 TLS 和网络访问限制。不要把原生产目录或 V4 目录作为安装目标。
 
 导航加载后，原 `real_controller` 只待命接收规划路径，不启动 SDK。点击“准备运动”时，浏览器只提交一次现场确认；服务端检查地图、定位、授权资源和私有设备 ID，调用原 `arm_nav.sh --web-approved` 执行零速接管并核对 SDK 反馈，不模拟终端 `READY`。选目标的 WebSocket 代理只允许规划话题。点击“开始导航”后，后端才通过固定链路向原控制器与 SDK Bridge 发送启动请求，并等待实际反馈。页面心跳、服务端和独立租约守护进程在失联、定位丢失或控制节点异常时发起受控停止并保持锁定。停止未确认时必须现场使用物理急停；进程退出不能证明机器狗已安全停止。
 
