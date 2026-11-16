@@ -12,4 +12,10 @@
 
 同源示例地图在原 AGX 的交接归档中已有记录。接手人应按[正式部署说明](https://github.com/Pandc-12478/agx-odin1-quadruped-navigation/blob/main/v5-web/DEPLOY.md)取得数据，登记源 BIN 与对应规划包。当前资料未确认该示例是否正是晚间 9 点规划所用的地图。
 
-公开快照源码可对照[文档更新前的提交](https://github.com/Pandc-12478/odin3d-agx-cyvet-v5-handoff/commit/175bdc340ffc47e9b9ad3e67891c38c433b0cdd0)。现场截图及该轮原始路线日志待补。
+## 2026-11-16 网页选点规划截图
+
+V5 Web 三维页（Voxel V47）显示「机器人定位成功」、绿色可通行栅格，以及连接机器人起点与红色目标的紫色规划路径。截图用于记录本次无运动选点规划。此次使用的地图名待补录。
+
+![V5 Web 三维页显示定位成功、绿色可通行栅格和紫色规划路径](docs/images/v5-web-path-2026-11-16.png)
+
+公开快照源码可对照[文档更新前的提交](https://github.com/Pandc-12478/odin3d-agx-cyvet-v5-handoff/commit/175bdc340ffc47e9b9ad3e67891c38c433b0cdd0)。2026-11-13 那轮规划的原始路线日志待补。
