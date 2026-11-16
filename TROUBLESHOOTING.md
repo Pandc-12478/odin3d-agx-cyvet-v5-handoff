@@ -1,8 +1,10 @@
 # 常见故障
 
+运行命令适用于已部署的 V5。首次安装请按[正式部署说明](https://github.com/Pandc-12478/agx-odin1-quadruped-navigation/blob/main/v5-web/DEPLOY.md)准备独立部署目录。
+
 | 提示或现象 | 处理 |
 | --- | --- |
-| 安装生成配置后退出 | 负责人填写 AGX 本机权限 600 的 `config.env`，补齐合法 SDK、授权、网络与路径后重跑 `bash install.sh`。 |
+| 安装生成配置后退出 | 在正式 V5 安装目录内填写 AGX 本机权限 600 的 `config.env`，补齐 SDK、授权、网络与路径后重跑该目录的 `bash install.sh`。 |
 | 网页打不开或端口占用 | 负责人运行 `./odin3d status`、`./odin3d doctor`，核对实际 IP、端口、TLS 与本目录服务；不要强制结束未知进程。 |
 | Odin1 点云缺失 | 检查相机供电、连接、`/odin1/cloud_slam` 和 ROSBridge 9090。 |
 | BIN 保存或转换失败 | 保留原 BIN 和日志。核对 LiDAR 采集、厂商转换器及同图文件；image-only BIN 无法导出 LiDAR 点云。 |

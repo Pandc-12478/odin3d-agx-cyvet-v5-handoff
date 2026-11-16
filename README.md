@@ -1,6 +1,10 @@
-# Odin3D V5 开发交接
+# Odin3D V5 冻结源码快照
 
-这是 AGX Orin、Odin1 和宇泛灵猫项目在 2026-11-13 的冻结源码。运行入口为 `odin3d`。`install.sh` 保留冻结版的旧仓库检出步骤，不能直接用于这个仓库的新克隆。接手时先用源码核对 AGX 部署，再按实际设备补齐依赖。
+这里保留 AGX Orin、Odin1 和宇泛灵猫项目于 2026-11-13 冻结的 V5 源码，供对照现场部署和查阅历史实现。
+
+**正式交接从[私有项目仓库](https://github.com/Pandc-12478/agx-odin1-quadruped-navigation)开始。** 接手人获得访问权限后，可以在首页找到 SSH 开发版和 V5 Web 演示版。V5 的首次部署按[正式部署说明](https://github.com/Pandc-12478/agx-odin1-quadruped-navigation/blob/main/v5-web/DEPLOY.md)操作。
+
+**本快照的安装限制。** 默认布局下，[冻结版安装器](install.sh)会将快照自带的 `work/` 源码目录判定为已有目录。需要重新检出时，安装器仍依赖私有仓库中的固定基线。新克隆本快照后，请使用正式交接仓库的部署入口。
 
 ## 代码从哪里读
 
@@ -12,7 +16,7 @@
 - `work/odin_ws/src/odin_ros_driver/` 保存冻结版 Odin ROS 驱动源码。
 - `private-adapter/dog_control3.py` 保存机器狗的连接和接管代码，默认设备 ID 已改为读取本机环境变量。
 
-[DEPLOY.md](DEPLOY.md) 说明安装和外部依赖。冻结时的源码修改记录在 `GIT/` 和 `integration.patch`。
+[快照依赖清单](DEPLOY.md)列出现场要交接的资源，[排障说明](TROUBLESHOOTING.md)适用于已部署环境。冻结时的源码修改记录在 `GIT/` 和 `integration.patch`，上游项目与离线库见[第三方来源](THIRD_PARTY.md)。
 
 ## 当前还需补齐
 
@@ -20,4 +24,4 @@
 
 仓库的 `work/odin_ws/src/odin_ros_driver/config/control_command.yaml` 已清除旧机器的地图绝对路径。原设备的相机标定参数保留，序列号注释已移除。更换设备须核对标定与外参。
 
-冻结 Demo 已有建图、保存、同源地图处理、重定位和网页选点规划证据。真实 SDK 接管、跟踪到点及停止链仍需现场验收。
+冻结 Demo 已有建图、保存、同源地图处理、重定位和网页选点规划证据。真实 SDK 接管、短路线到点、停车和掉线锁定，以及全新 AGX 首装仍需现场验收。详见[现场验收记录](VALIDATION.md)。
